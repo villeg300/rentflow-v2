@@ -1,14 +1,17 @@
 from datetime import date
 from decimal import Decimal
+from unittest.mock import patch
 
 from django.core.exceptions import ValidationError
 from django.test import TestCase
+from rest_framework import status
+from rest_framework.test import APITestCase
 
 from leases.models import Lease, Rent
 from payments.services import create_payment
 from properties.models import Property, Unit
 from tenants.models import Tenant
-from unittest.mock import patch
+
 
 
 class CreatePaymentTests(TestCase):
@@ -486,4 +489,142 @@ class CreatePaymentTests(TestCase):
                 Rent.Status.PENDING,
             )
 
+
+class PaymentAPITests(APITestCase):
+    def setUp(self):
+        self.property = Property.objects.create(
+            name="Résidence API Test",
+            address="Zone du Bois",
+            city="Ouagadougou",
+        )
+
+        self.unit = Unit.objects.create(
+            property=self.property,
+            name="A01",
+            monthly_rent=Decimal("75000"),
+        )
+
+        self.tenant = Tenant.objects.create(
+            first_name="Jean",
+            last_name="API",
+            phone="71000000",
+        )
+
+        self.lease = Lease.objects.create(
+            unit=self.unit,
+            tenant=self.tenant,
+            start_date=date(2026, 10, 1),
+            rent_amount=Decimal("75000"),
+            deposit_amount=Decimal("150000"),
+            max_installments=3,
+            due_day=5,
+        )
+
+        self.rent = Rent.objects.create(
+            lease=self.lease,
+            period=date(2026, 10, 1),
+            amount_due=Decimal("75000"),
+            due_date=date(2026, 10, 5),
+        )
+
+        self.url = "/api/payments/"
+
+    # ---------------------------------------------------------
+    # CRÉATION D'UN PAIEMENT VIA L'API
+    # ---------------------------------------------------------
+
+    def test_create_payment_api(self):
+        response = self.client.post(
+            self.url,
+            {
+                "rent": self.rent.id,
+                "amount": "20000",
+                "payment_date": "2026-10-01",
+                "payment_method": "MOBILE_MONEY",
+                "reference": "API-TEST-001",
+                "note": "Premier paiement API",
+            },
+            format="json",
+        )
+
+        self.assertEqual(
+            response.status_code,
+            status.HTTP_201_CREATED,
+        )
+
+        self.assertEqual(
+            response.data["rent"],
+            self.rent.id,
+        )
+
+        self.assertEqual(
+            response.data["amount"],
+            "20000.00",
+        )
+
+        self.assertEqual(
+            response.data["payment_method"],
+            "MOBILE_MONEY",
+        )
+
+        self.assertEqual(
+            self.rent.payments.count(),
+            1,
+        )
+
+        self.assertEqual(
+            self.rent.total_paid,
+            Decimal("20000"),
+        )
+
+    # ---------------------------------------------------------
+    # REFUS D'UN PAIEMENT SUPÉRIEUR AU RESTE VIA L'API
+    # ---------------------------------------------------------
+
+    def test_reject_payment_above_remaining_amount_api(self):
+        create_payment(
+            rent=self.rent,
+            amount=Decimal("20000"),
+            payment_date=date(2026, 10, 1),
+            payment_method="MOBILE_MONEY",
+            reference="API-TEST-001",
+        )
+
+        response = self.client.post(
+            self.url,
+            {
+                "rent": self.rent.id,
+                "amount": "60000",
+                "payment_date": "2026-10-02",
+                "payment_method": "MOBILE_MONEY",
+                "reference": "API-TEST-ERROR-001",
+                "note": "Test dépassement",
+            },
+            format="json",
+        )
+
+        self.assertEqual(
+            response.status_code,
+            status.HTTP_400_BAD_REQUEST,
+        )
+
+        self.assertEqual(
+            response.data["detail"],
+            ["Le montant du paiement dépasse le reste à payer."],
+        )
+
+        self.assertEqual(
+            self.rent.payments.count(),
+            1,
+        )
+
+        self.assertEqual(
+            self.rent.total_paid,
+            Decimal("20000"),
+        )
+
+        self.assertEqual(
+            self.rent.remaining_amount,
+            Decimal("55000"),
+        )
 
